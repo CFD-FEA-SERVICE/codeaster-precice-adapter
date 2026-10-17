@@ -1,0 +1,84 @@
+# precice_aster self-test: runs inside code_aster, WITHOUT preCICE.
+# Copyright (C) 2026 CFD FEA SERVICE S.R.L.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Exercises the exact code path of the FSI module (node extraction, FORMULE-based
+# nodal forces, DYNA_NON_LINE restarts, POST_RELEVE_T extraction) on the flap mesh
+# and checks it against beam theory.  Run it first on a new installation:
+#   run_aster selftest.export      -> look for "PRECICE_ASTER SELFTEST: PASS"
+import os
+import sys
+
+sys.path.insert(0, os.environ.get("PRECICE_ASTER_ROOT", "/opt/codeaster-precice-adapter"))
+
+from code_aster.Commands import *  # noqa: F401,F403
+import numpy as np
+
+DEBUT()
+
+E, NU, RHO, W, H = 4.0e6, 0.3, 3000.0, 0.1, 1.0
+mesh = LIRE_MAILLAGE(UNITE=20, FORMAT="ASTER")
+model = AFFE_MODELE(MAILLAGE=mesh, AFFE=_F(TOUT="OUI", PHENOMENE="MECANIQUE", MODELISATION="D_PLAN"))
+mat = DEFI_MATERIAU(ELAS=_F(E=E, NU=NU, RHO=RHO))
+mater = AFFE_MATERIAU(MAILLAGE=mesh, AFFE=_F(TOUT="OUI", MATER=mat))
+clamp = AFFE_CHAR_MECA(MODELE=model, DDL_IMPO=_F(GROUP_MA="base", DX=0.0, DY=0.0))
+
+from precice_aster.fsi import AsterFSISolid  # noqa: E402
+
+results = []
+
+
+def check(name, ok, detail):
+    results.append(ok)
+    print(f"PRECICE_ASTER SELFTEST [{'ok' if ok else 'FAIL'}] {name}: {detail}", flush=True)
+
+
+solid = AsterFSISolid(mesh, model, mater, "flap", loads=[clamp])
+coords = solid.vertices(2)
+check("coupling nodes", len(coords) == 169, f"{len(coords)} nodes on 'flap' (expected 169)")
+
+tip = np.where(np.isclose(coords[:, 1], H))[0]
+F = np.zeros_like(coords)
+F[tip, 0] = 1.0 / len(tip)  # 1 N (per unit depth) in x, spread on the top edge
+
+# 1) quasi-static response: a step much longer than the first period (~1.7 s)
+#    makes the trapezoidal Newmark step close to a static solve.
+dt = 1000.0
+s0 = solid.initial_state()
+s1, out1 = solid.solve(s0, 0.0, dt, {"Force": F})
+w1 = float(out1["Displacement"][tip, 0].mean())
+Ep, G, I = E / (1 - NU ** 2), E / (2 * (1 + NU)), W ** 3 / 12.0
+w_ref = H ** 3 / (3 * Ep * I) + H / (5.0 / 6.0 * G * W)  # bending (plane strain) + shear
+check("static tip deflection", abs(w1 / w_ref - 1) < 0.05,
+      f"code_aster {w1:.6e} m, beam theory {w_ref:.6e} m, ratio {w1 / w_ref:.4f}")
+
+# 2) load update between calls is seen by code_aster (FORMULE reads the new values)
+s2, out2 = solid.solve(s1, dt, dt, {"Force": 2 * F})
+w2 = float(out2["Displacement"][tip, 0].mean())
+check("load update", abs(w2 / (2 * w1) - 1) < 0.02, f"doubled force -> ratio {w2 / w1:.4f} (expected 2)")
+
+# 3) checkpoint semantics: solving again from the same state gives the same answer
+s2b, out2b = solid.solve(s1, dt, dt, {"Force": 2 * F})
+d = float(np.max(np.abs(out2b["Displacement"] - out2["Displacement"])))
+check("restart from checkpoint", d < 1e-10 * max(abs(w2), 1e-30) + 1e-14, f"max difference {d:.3e}")
+
+# 4) dynamics: free vibration after release, first period vs beam theory
+s, t, hist = s1, dt, []
+dtd = 0.02
+for k in range(150):
+    s, out = solid.solve(s, t, dtd, {"Force": np.zeros_like(F)})
+    t += dtd
+    hist.append(float(out["Displacement"][tip, 0].mean()))
+h = np.array(hist)
+crossings = np.where((h[:-1] > 0) & (h[1:] <= 0))[0]
+if len(crossings) >= 2:
+    T_num = (crossings[1] - crossings[0]) * dtd
+    m = RHO * W  # mass per unit length (unit depth)
+    T_ref = 2 * np.pi / (1.875104 ** 2 * np.sqrt(Ep * I / (m * H ** 4)))
+    check("first period", abs(T_num / T_ref - 1) < 0.08,
+          f"code_aster {T_num:.3f} s, Euler-Bernoulli {T_ref:.3f} s")
+else:
+    check("first period", False, "no oscillation detected")
+
+print("PRECICE_ASTER SELFTEST: " + ("PASS" if all(results) else "FAIL"), flush=True)
+FIN()

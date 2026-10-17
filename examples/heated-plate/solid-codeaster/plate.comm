@@ -1,0 +1,40 @@
+# flow-over-heated-plate-steady-state, solid participant: code_aster + precice_aster (CHT)
+# Copyright (C) 2026 CFD FEA SERVICE S.R.L.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Plate 1 x 0.25 (2D), k = 100 W/m/K, bottom at 310 K, left/right adiabatic,
+# top = coupling surface (Robin-Robin with OpenFOAM). Same data as the preCICE
+# tutorial solid-codeaster case, which was 3D and used the old CHT-only adapter.
+import os
+import sys
+
+sys.path.insert(0, os.environ.get("PRECICE_ASTER_ROOT", "/opt/codeaster-precice-adapter"))
+
+from code_aster.Commands import *  # noqa: F401,F403
+
+DEBUT()
+
+mesh = LIRE_MAILLAGE(UNITE=20, FORMAT="ASTER")
+model = AFFE_MODELE(MAILLAGE=mesh, AFFE=_F(TOUT="OUI", PHENOMENE="THERMIQUE", MODELISATION="PLAN"))
+
+LAMBDA = 100.0
+steel = DEFI_MATERIAU(THER=_F(LAMBDA=LAMBDA, RHO_CP=100.0))
+mater = AFFE_MATERIAU(MAILLAGE=mesh, AFFE=_F(TOUT="OUI", MATER=steel))
+
+hot = AFFE_CHAR_THER(MODELE=model, TEMP_IMPO=_F(GROUP_MA="bottom", TEMP=310.0))
+# left/right: no load = adiabatic
+
+from precice_aster.cht import run_cht  # noqa: E402
+
+run_cht(mesh, model, mater,
+        interface_group="interface",
+        loads=[hot],
+        conductivity=LAMBDA,
+        delta=0.25 / 20 / 2,          # half the element height at the interface -> HTC = k / delta
+        steady=True,                  # steady THER_LINEAIRE at every window
+        initial_temperature=310.0,
+        mesh_name="Solid-Interface-Nodes",
+        output_dir=os.path.join(os.environ.get("PRECICE_CASE_DIR", "."), "results"),
+        output_every=50)
+
+FIN()

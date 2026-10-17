@@ -1,0 +1,39 @@
+# perpendicular-flap, solid participant: code_aster + precice_aster (FSI)
+# Copyright (C) 2026 CFD FEA SERVICE S.R.L.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Same solid as the preCICE tutorial: flap 0.1 x 1 (2D plane strain, unit depth),
+# E = 4 MPa, nu = 0.3, rho = 3000 kg/m3, clamped at y = 0, linear geometry.
+# Environment (set by run.sh): PRECICE_ASTER_ROOT, PRECICE_CONFIG_FILE,
+# PRECICE_PARTICIPANT, PRECICE_CASE_DIR.
+import os
+import sys
+
+sys.path.insert(0, os.environ.get("PRECICE_ASTER_ROOT", "/opt/codeaster-precice-adapter"))
+
+from code_aster.Commands import *  # noqa: F401,F403
+
+DEBUT()
+
+mesh = LIRE_MAILLAGE(UNITE=20, FORMAT="ASTER")
+
+model = AFFE_MODELE(MAILLAGE=mesh,
+                    AFFE=_F(TOUT="OUI", PHENOMENE="MECANIQUE", MODELISATION="D_PLAN"))
+
+rubber = DEFI_MATERIAU(ELAS=_F(E=4.0e6, NU=0.3, RHO=3000.0))
+mater = AFFE_MATERIAU(MAILLAGE=mesh, AFFE=_F(TOUT="OUI", MATER=rubber))
+
+clamp = AFFE_CHAR_MECA(MODELE=model, DDL_IMPO=_F(GROUP_MA="base", DX=0.0, DY=0.0))
+
+from precice_aster.fsi import run_fsi  # noqa: E402
+
+run_fsi(mesh, model, mater,
+        interface_group="flap",             # wetted surface (left + top + right)
+        loads=[clamp],
+        mesh_name="Solid-Mesh", force_name="Force", displacement_name="Displacement",
+        deformation="PETIT",                # linear, as the tutorial's CalculiX/solids4foam cases
+        newmark=(0.25, 0.5),                # trapezoidal rule, no numerical damping
+        output_dir=os.path.join(os.environ.get("PRECICE_CASE_DIR", "."), "results"),
+        output_every=10)
+
+FIN()
