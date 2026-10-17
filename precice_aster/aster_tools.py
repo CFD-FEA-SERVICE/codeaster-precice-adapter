@@ -23,11 +23,63 @@ def set_command_provider(provider):
     _provider = provider
 
 
+def _to_factor(value, F):
+    """Plain dicts (and lists/tuples of dicts) -> code_aster _F factor keywords.
+
+    Some commands (e.g. DYNA_NON_LINE, STAT_NON_LINE) inspect factor keywords
+    as ``keywords["INCREMENT"][0]`` before the syntax is normalised, which only
+    works with _F objects, not with plain dicts.
+    """
+    if isinstance(value, dict) and not isinstance(value, F):
+        return F(**{k: _to_factor(v, F) for k, v in value.items()})
+    if isinstance(value, (list, tuple)) and value and all(isinstance(v, dict) for v in value):
+        return tuple(_to_factor(v, F) for v in value)
+    return value
+
+
+class _LocalF(dict):
+    """Fallback with the behaviour of code_aster's _F: ``f[0] is f``."""
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            if key == 0:
+                return self
+            raise IndexError(key)
+        return dict.__getitem__(self, key)
+
+
+_F_CLASS = None
+
+
+def _factor_class(commands_module):
+    """code_aster's _F class: its location changed across versions."""
+    global _F_CLASS
+    if _F_CLASS is None:
+        import builtins
+        import importlib
+        candidates = [getattr(commands_module, "_F", None), getattr(builtins, "_F", None)]
+        for mod in ("code_aster.Cata.Syntax", "code_aster.Cata.Language.Syntax",
+                    "code_aster.Supervis", "code_aster.Utilities", "code_aster.CA"):
+            try:
+                candidates.append(getattr(importlib.import_module(mod), "_F", None))
+            except Exception:  # noqa: BLE001  (module absent in this version)
+                pass
+        found = next((c for c in candidates if isinstance(c, type) and issubclass(c, dict)), None)
+        _F_CLASS = found or _LocalF
+    return _F_CLASS
+
+
 def cmd(name):
     if _provider is not None:
         return _provider(name)
     import code_aster.Commands as C  # noqa: N812  (code_aster >= 15)
-    return getattr(C, name)
+    command, F = getattr(C, name), _factor_class(C)
+
+    def call(**keywords):
+        return command(**{k: _to_factor(v, F) for k, v in keywords.items()})
+
+    call.__name__ = name
+    return call
 
 
 COORD_COLS = ("COOR_X", "COOR_Y", "COOR_Z")

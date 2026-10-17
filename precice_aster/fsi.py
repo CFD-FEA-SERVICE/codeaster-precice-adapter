@@ -44,12 +44,20 @@ class AsterFSISolid(SolverInterface):
     substeps : code_aster steps per coupling step
     output_dir, output_every : MED snapshots of the accepted state every N windows
     dyna_options : extra DYNA_NON_LINE keywords (SOLVEUR, CONVERGENCE, NEWTON, ...)
+    initial_acceleration : "zero" (default) starts from rest with zero displacement,
+        velocity and acceleration; "equilibrium" lets code_aster compute the
+        initial acceleration from the loads, which in a coupled run would be the
+        force at the END of the first window (a sudden load).
+    zero_load_tol : absolute Newton tolerance (RESI_GLOB_MAXI, in N) used when the
+        coupling force is identically zero (first coupling iteration, fluid at
+        rest): the default relative criterion is undefined (0/0) in that case.
     """
 
     def __init__(self, mesh, model, material, interface_group, loads=(),
                  mesh_name="Solid-Mesh", force_name="Force", displacement_name="Displacement",
                  deformation="PETIT", relation="ELAS", newmark=(0.25, 0.5), substeps=1,
-                 output_dir=None, output_every=0, dyna_options=None, log=print):
+                 output_dir=None, output_every=0, dyna_options=None,
+                 initial_acceleration="zero", zero_load_tol=1e-8, log=print):
         self.mesh, self.model, self.material = mesh, model, material
         self.group = interface_group
         self.node_group = (interface_group + "_PRCN")[:24]
@@ -62,6 +70,11 @@ class AsterFSISolid(SolverInterface):
         self.substeps = int(substeps)
         self.output_dir, self.output_every = output_dir, int(output_every)
         self.dyna_options = dict(dyna_options or {})
+        if initial_acceleration not in ("zero", "equilibrium"):
+            raise ValueError("initial_acceleration must be 'zero' or 'equilibrium'")
+        self.initial_acceleration = initial_acceleration
+        self._rest = None
+        self.zero_load_tol = float(zero_load_tol)
         self.log = log
         self.dim = None
         self.keys = None
@@ -117,6 +130,15 @@ class AsterFSISolid(SolverInterface):
         if state.result is not None:
             kw["ETAT_INIT"] = dict(EVOL_NOLI=state.result, INST=state.t,
                                    CRITERE="ABSOLU", PRECISION=_eps(dt))
+        elif self.initial_acceleration == "zero":
+            if self._rest is None:  # zero nodal field, built once
+                self._rest = at.cmd("CREA_CHAMP")(
+                    TYPE_CHAM="NOEU_DEPL_R", OPERATION="AFFE", MODELE=self.model,
+                    AFFE=dict(TOUT="OUI", NOM_CMP=self.comps, VALE=(0.0,) * self.dim))
+            kw["ETAT_INIT"] = dict(DEPL=self._rest, VITE=self._rest, ACCE=self._rest)
+        if not np.any(forces) and "CONVERGENCE" not in self.dyna_options:
+            # relative residual is 0/0 without external load: use the absolute one
+            kw["CONVERGENCE"] = dict(RESI_GLOB_MAXI=self.zero_load_tol)
         kw.update(self.dyna_options)
         misses = sum(fi.misses for fi in self.force_interp)
         result = at.cmd("DYNA_NON_LINE")(**kw)

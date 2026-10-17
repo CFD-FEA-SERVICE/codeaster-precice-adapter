@@ -95,8 +95,12 @@ class AsterCHTSolid(SolverInterface):
         command = at.cmd("THER_NON_LINE" if self.nonlinear else "THER_LINEAIRE")
         kw = dict(MODELE=self.model, CHAM_MATER=self.material, EXCIT=excit)
         if self.steady:
-            kw["ETAT_INIT"] = dict(STATIONNAIRE="OUI")
+            # code_aster 17: steady solve = TYPE_CALCUL='STAT', INCREMENT still mandatory:
+            # a one-instant list (end of the window) gives exactly one steady solve
+            kw["TYPE_CALCUL"] = "STAT"
+            kw["INCREMENT"] = dict(LIST_INST=at.cmd("DEFI_LIST_REEL")(VALE=(t1,)))
         else:
+            kw["TYPE_CALCUL"] = "TRAN"
             kw["INCREMENT"] = dict(LIST_INST=at.time_list(t, t1, 1))
             kw["PARM_THETA"] = 1.0
             if state.result is None:

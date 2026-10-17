@@ -24,8 +24,8 @@ class ThermalStub(aster_stub.Stub):
         return Load("robin", kw)
 
     def THER_LINEAIRE(self, **kw):
-        _check("THER_LINEAIRE", kw, ("MODELE", "CHAM_MATER", "EXCIT", "ETAT_INIT", "INCREMENT", "PARM_THETA"))
-        assert kw["ETAT_INIT"] == {"STATIONNAIRE": "OUI"}
+        _check("THER_LINEAIRE", kw, ("MODELE", "CHAM_MATER", "EXCIT", "ETAT_INIT", "INCREMENT", "PARM_THETA", "TYPE_CALCUL"))
+        assert kw["TYPE_CALCUL"] == "STAT" and "ETAT_INIT" not in kw and len(kw["INCREMENT"]["LIST_INST"]) == 1
         robin = [e["CHARGE"] for e in kw["EXCIT"] if isinstance(e["CHARGE"], Load)][0].kw["ECHANGE"]
         nodes = sorted({n for c in self.mesh.cell_groups[robin["GROUP_MA"]] for n in c})
         res = aster_stub.Result()

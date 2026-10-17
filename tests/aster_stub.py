@@ -83,7 +83,10 @@ class Stub:
         return self.mesh
 
     def CREA_CHAMP(self, **kw):
-        _check("CREA_CHAMP", kw, ("TYPE_CHAM", "OPERATION", "MAILLAGE", "NOM_CHAM"))
+        _check("CREA_CHAMP", kw, ("TYPE_CHAM", "OPERATION", "MAILLAGE", "NOM_CHAM", "MODELE", "AFFE"))
+        if kw["OPERATION"] == "AFFE":
+            assert kw["TYPE_CHAM"] == "NOEU_DEPL_R" and set(kw["AFFE"]["VALE"]) == {0.0}
+            return ("ZERO",)
         assert kw["TYPE_CHAM"] == "NOEU_GEOM_R" and kw["NOM_CHAM"] == "GEOMETRIE"
         return ("GEOM", kw["MAILLAGE"])
 
@@ -125,7 +128,9 @@ class Stub:
         return Load("force", kw)
 
     def DEFI_LIST_REEL(self, **kw):
-        _check("DEFI_LIST_REEL", kw, ("DEBUT", "INTERVALLE"))
+        _check("DEFI_LIST_REEL", kw, ("DEBUT", "INTERVALLE", "VALE"))
+        if "VALE" in kw:
+            return list(kw["VALE"])
         i = kw["INTERVALLE"]
         return list(np.linspace(kw["DEBUT"], i["JUSQU_A"], i["NOMBRE"] + 1))
 
@@ -148,7 +153,11 @@ class Stub:
             j = int(np.argmin(np.abs(b.y - y[k])))
             side = 0 if self.mesh.coords[n, 0] < 0 else len(b.y)
             forces[side + j] += f[k]
-        if "ETAT_INIT" in kw:
+        if "ETAT_INIT" in kw and "EVOL_NOLI" not in kw["ETAT_INIT"]:
+            ei = kw["ETAT_INIT"]
+            assert ei["DEPL"] == ei["VITE"] == ei["ACCE"] == ("ZERO",)
+            s = b.initial_state()
+        elif "ETAT_INIT" in kw:
             ei = kw["ETAT_INIT"]; prev = ei["EVOL_NOLI"]
             t0 = min(prev.states, key=lambda t: abs(t - ei["INST"]))
             assert abs(t0 - ei["INST"]) <= ei["PRECISION"] * 1.0001

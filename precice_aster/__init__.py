@@ -26,7 +26,7 @@ The code_aster specific modules are imported lazily, so the core can be
 tested without code_aster installed.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 
 from .core import CouplingLoop, SolverInterface  # noqa: F401
 from .interpolation import NodalInterpolant  # noqa: F401

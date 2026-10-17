@@ -30,15 +30,18 @@
     <write-data name="Heat-Transfer-Coefficient-Fluid" mesh="Fluid-Interface" />
     <read-data name="Sink-Temperature-Solid" mesh="Fluid-Interface" />
     <read-data name="Heat-Transfer-Coefficient-Solid" mesh="Fluid-Interface" />
-    <mapping:nearest-neighbor direction="write" from="Fluid-Interface" to="Solid-Interface-Nodes" constraint="consistent" />
     <mapping:nearest-neighbor direction="read" from="Solid-Interface-Nodes" to="Fluid-Interface" constraint="consistent" />
   </participant>
   <participant name="Solid">
     <provide-mesh name="Solid-Interface-Nodes" />
+    <receive-mesh name="Fluid-Interface" from="Fluid" />
     <write-data name="Sink-Temperature-Solid" mesh="Solid-Interface-Nodes" />
     <write-data name="Heat-Transfer-Coefficient-Solid" mesh="Solid-Interface-Nodes" />
     <read-data name="Sink-Temperature-Fluid" mesh="Solid-Interface-Nodes" />
     <read-data name="Heat-Transfer-Coefficient-Fluid" mesh="Solid-Interface-Nodes" />
+    <!-- fluid -> solid mapping done here (serial code_aster): a parallel OpenFOAM may
+         only use read-consistent / write-conservative mappings -->
+    <mapping:nearest-neighbor direction="read" from="Fluid-Interface" to="Solid-Interface-Nodes" constraint="consistent" />
   </participant>
   <m2n:sockets acceptor="Fluid" connector="Solid" exchange-directory=".." />
   <coupling-scheme:serial-explicit>
@@ -47,7 +50,7 @@
     <participants first="Solid" second="Fluid" />
     <exchange data="Sink-Temperature-Solid" mesh="Solid-Interface-Nodes" from="Solid" to="Fluid" />
     <exchange data="Heat-Transfer-Coefficient-Solid" mesh="Solid-Interface-Nodes" from="Solid" to="Fluid" />
-    <exchange data="Sink-Temperature-Fluid" mesh="Solid-Interface-Nodes" from="Fluid" to="Solid" initialize="yes" />
-    <exchange data="Heat-Transfer-Coefficient-Fluid" mesh="Solid-Interface-Nodes" from="Fluid" to="Solid" initialize="yes" />
+    <exchange data="Sink-Temperature-Fluid" mesh="Fluid-Interface" from="Fluid" to="Solid" initialize="yes" />
+    <exchange data="Heat-Transfer-Coefficient-Fluid" mesh="Fluid-Interface" from="Fluid" to="Solid" initialize="yes" />
   </coupling-scheme:serial-explicit>
 </precice-configuration>
