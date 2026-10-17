@@ -32,7 +32,9 @@ class NodalInterpolant:
         self.default = float(default)
         self.calls = 0
         self.misses = 0
-        # simple uniform-grid bucket index for O(1)-ish lookups
+        # simple uniform-grid bucket index for O(1)-ish lookups: code_aster calls the
+        # interpolant once per node and per component at every load evaluation, so a
+        # brute-force search would cost O(n) per call
         span = self.coords.max(0) - self.coords.min(0)
         span[span == 0] = 1.0
         self._h = float(np.max(span)) / max(int(np.sqrt(self.n)), 1)
@@ -45,12 +47,14 @@ class NodalInterpolant:
         return [tuple(k) for k in np.floor((pts - self._origin) / self._h).astype(int)]
 
     def update(self, values):
+        """Replace the vertex values (same order as ``coords``); geometry is unchanged."""
         values = np.asarray(values, dtype=float)
         if values.shape != (self.n,):
             raise ValueError(f"expected {self.n} values, got {values.shape}")
         self.values[:] = values
 
     def nearest(self, point):
+        """(index, distance) of the coupling vertex nearest to ``point``."""
         p = np.asarray(point, dtype=float)[: self.dim]
         key = tuple(np.floor((p - self._origin) / self._h).astype(int))
         best, best_d = -1, np.inf

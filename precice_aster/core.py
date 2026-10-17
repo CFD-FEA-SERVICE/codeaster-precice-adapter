@@ -9,6 +9,22 @@ has to implement :class:`SolverInterface`.  The solver never mutates its
 whether to keep it (time step accepted) or to go back to the checkpoint
 (implicit coupling sub-iteration).  This keeps the code_aster side free of any
 preCICE bookkeeping.
+
+Sequence of one coupled run (preCICE v3 API)::
+
+    Participant(...)                  connect, read precice-config.xml
+    set_mesh_vertices(...)            declare the coupling vertices
+    write_data(...) if needed         initial data (requires_initial_data)
+    initialize()
+    while is_coupling_ongoing():
+        checkpoint if asked           (implicit coupling only)
+        read_data(...)                data of the other participant at t + dt
+        solve(state, t, dt, ...)      solver step -> new state + data to send
+        write_data(...)
+        advance(dt)                   exchange, convergence check, acceleration
+        restore checkpoint if asked   (sub-iteration not converged)
+        otherwise accept new state
+    finalize()
 """
 
 import glob
@@ -22,6 +38,8 @@ class SolverInterface:
     """What a coupled solver must provide.
 
     Subclasses implement these methods; states are opaque objects for the loop.
+    The code_aster participants are :class:`precice_aster.fsi.AsterFSISolid` and
+    :class:`precice_aster.cht.AsterCHTSolid`; tests/mock_beam.py is a pure-Python one.
     """
 
     #: name of the preCICE mesh the solver provides
@@ -74,9 +92,12 @@ class CouplingLoop:
         self.stats = {"windows": 0, "solves": 0, "restores": 0, "wall": 0.0}
 
     def run(self):
+        """Run the coupled simulation to the end; return ``(final_state, final_time)``."""
         s = self.solver
         p = self.precice.Participant(self.participant_name, self.config_file,
                                      self.rank, self.size)
+        # the solver builds its coupling vertices only now, because the mesh dimension
+        # (2D/3D) is defined in precice-config.xml, not in the solver input
         dims = p.get_mesh_dimensions(s.mesh_name)
         coords = s.vertices(dims)
         if coords.ndim != 2 or coords.shape[1] != dims:
@@ -86,6 +107,7 @@ class CouplingLoop:
                  f"{len(ids)} vertices on mesh {s.mesh_name} ({dims}D)")
 
         state = s.initial_state()
+        # needed when the config exchanges this participant's data with initialize="yes"
         if p.requires_initial_data():
             for name, values in s.initial_write_values(state).items():
                 p.write_data(s.mesh_name, name, ids, values)
@@ -94,13 +116,18 @@ class CouplingLoop:
         t, window, checkpoint = 0.0, 0, None
         t0_wall = _time.time()
         while p.is_coupling_ongoing():
+            # start of a time window (implicit coupling): remember where it starts.
+            # States are never modified in place, so storing the reference is enough.
             if p.requires_writing_checkpoint():
                 checkpoint = (state, t)
 
+            # time step = what is left of the current window (or less: sub-cycling)
             dt = p.get_max_time_step_size()
             if s.max_dt is not None:
                 dt = min(dt, s.max_dt)
 
+            # data of the other participant at the END of this step (t + dt),
+            # interpolated in time by preCICE when sub-cycling
             read_values = {name: p.read_data(s.mesh_name, name, ids, dt)
                            for name in s.read_data}
             new_state, write_values = s.solve(state, t, dt, read_values)
@@ -108,14 +135,18 @@ class CouplingLoop:
             for name in s.write_data:
                 p.write_data(s.mesh_name, name, ids, write_values[name])
 
+            # exchange data; for implicit coupling preCICE checks convergence here and
+            # applies the acceleration (IQN-ILS, Aitken) to the data we will read next
             p.advance(dt)
 
             if p.requires_reading_checkpoint():
+                # window not converged: discard new_state and redo the window from its start
                 if checkpoint is None:
                     raise RuntimeError("preCICE asked to read a checkpoint that was never written")
                 state, t = checkpoint
                 self.stats["restores"] += 1
             else:
+                # converged (or explicit coupling): accept the step
                 state, t = new_state, t + dt
                 if p.is_time_window_complete():
                     window += 1

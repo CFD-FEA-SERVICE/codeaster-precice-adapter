@@ -46,6 +46,7 @@ class AsterCHTSolid(SolverInterface):
                  output_dir=None, output_every=0, ther_options=None, log=print):
         self.mesh, self.model, self.material = mesh, model, material
         self.group = interface_group
+        # node group created from the cell group (24-character limit on group names)
         self.node_group = (interface_group + "_PRCN")[:24]
         self.loads = list(loads)
         self.k, self.delta = float(conductivity), float(delta)
@@ -57,6 +58,7 @@ class AsterCHTSolid(SolverInterface):
         self.log = log
 
     def vertices(self, dimensions):
+        """Coupling vertices = interface nodes; also builds the Robin (ECHANGE) load."""
         mdim = at.mesh_dimension(self.mesh)
         if mdim != dimensions:
             raise ValueError(f"preCICE mesh is {dimensions}D but the code_aster mesh is {mdim}D")
@@ -69,6 +71,8 @@ class AsterCHTSolid(SolverInterface):
         self.h_conv = NodalInterpolant(coords, values=np.zeros(len(coords)))
         self._formulas = (at.coordinate_formula(self.h_conv, dimensions),
                           at.coordinate_formula(self.t_sink, dimensions))
+        # built once: q = h_fluid * (T_sink_fluid - T_wall) on the interface, with
+        # h and T_sink as FORMULE objects of the coordinates
         self.robin = at.cmd("AFFE_CHAR_THER_F")(MODELE=self.model, ECHANGE=dict(
             GROUP_MA=self.group, COEF_H=self._formulas[0], TEMP_EXT=self._formulas[1]))
         self.log(f"[precice-aster] CHT: {len(self.keys)} coupling nodes on '{self.group}'")
@@ -80,6 +84,7 @@ class AsterCHTSolid(SolverInterface):
         return ThermalState(None, 0.0)
 
     def _write(self, temps):
+        """Data sent to the fluid: wall temperature and the solid-side HTC k/delta."""
         n = len(self.keys)
         return {self.write_data[0]: np.asarray(temps, float).reshape(n),
                 self.write_data[1]: np.full(n, self.k / self.delta)}
@@ -88,8 +93,11 @@ class AsterCHTSolid(SolverInterface):
         return self._write(np.full(len(self.keys), self.T0))
 
     def solve(self, state, t, dt, read_values):
+        """One thermal solve with the fluid's sink temperature and HTC."""
+        # 1) fluid data into the interpolants read by the ECHANGE load
         self.t_sink.update(np.asarray(read_values[self.read_data[0]], float).reshape(-1))
         self.h_conv.update(np.asarray(read_values[self.read_data[1]], float).reshape(-1))
+        # 2) THER_LINEAIRE (or THER_NON_LINE), steady or transient
         t1 = t + dt
         excit = [dict(CHARGE=l) for l in self.loads] + [dict(CHARGE=self.robin)]
         command = at.cmd("THER_NON_LINE" if self.nonlinear else "THER_LINEAIRE")
@@ -108,8 +116,9 @@ class AsterCHTSolid(SolverInterface):
             else:
                 kw["ETAT_INIT"] = dict(EVOL_THER=state.result, INST=state.t,
                                        CRITERE="ABSOLU", PRECISION=max(dt * 1e-6, 1e-12))
-        kw.update(self.ther_options)
+        kw.update(self.ther_options)  # user options win
         result = command(**kw)
+        # 3) wall temperature on the coupling nodes (last instant of the result)
         temps = at.nodal_result_values(result, "TEMP", ("TEMP",), self.node_group, self.keys,
                                        inst=None)[:, 0]
         return ThermalState(result, t1), self._write(temps)
@@ -131,6 +140,7 @@ def run_cht(mesh, model, material, interface_group, loads=(), participant=None,
     if not config_file:
         raise ValueError("give config_file= or set PRECICE_CONFIG_FILE (absolute path)")
     solver = AsterCHTSolid(mesh, model, material, interface_group, loads, **options)
+    # copy preCICE logs out of code_aster's temporary folder even if the run fails
     try:
         return CouplingLoop(solver, participant, config_file).run()
     finally:

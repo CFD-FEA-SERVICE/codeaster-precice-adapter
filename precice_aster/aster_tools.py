@@ -64,12 +64,19 @@ def _factor_class(commands_module):
                 candidates.append(getattr(importlib.import_module(mod), "_F", None))
             except Exception:  # noqa: BLE001  (module absent in this version)
                 pass
+        # first candidate that is a dict subclass; otherwise our own equivalent, which
+        # is enough for what code_aster needs (factor keyword access as kw[0])
         found = next((c for c in candidates if isinstance(c, type) and issubclass(c, dict)), None)
         _F_CLASS = found or _LocalF
     return _F_CLASS
 
 
 def cmd(name):
+    """code_aster command ``name``, wrapped so that plain dicts work as factor keywords.
+
+    The adapter writes ``INCREMENT=dict(...)``, ``EXCIT=[dict(...), ...]``; the wrapper
+    converts them to code_aster _F objects before the call.
+    """
     if _provider is not None:
         return _provider(name)
     import code_aster.Commands as C  # noqa: N812  (code_aster >= 15)
@@ -95,6 +102,7 @@ def table_to_dict(table):
 
 
 def mesh_dimension(mesh):
+    """Mesh dimension (2 for a plane mesh such as the .mail examples, 3 otherwise)."""
     try:
         return int(mesh.getDimension())
     except Exception:  # pragma: no cover - very old API
@@ -103,6 +111,7 @@ def mesh_dimension(mesh):
 
 def ensure_node_group(mesh, cell_group, node_group):
     """Create node group ``node_group`` from the nodes of cell group ``cell_group``."""
+    # reuse the group if it exists already (e.g. a second participant on the same mesh)
     try:
         if hasattr(mesh, "hasGroupOfNodes") and mesh.hasGroupOfNodes(node_group):
             return mesh
@@ -114,7 +123,12 @@ def ensure_node_group(mesh, cell_group, node_group):
 
 
 def _rows(tab_dict, value_cols):
-    """List of (key, coords, values) for every row of an extraction table."""
+    """List of (key, coords, values) for every row of an extraction table.
+
+    The key identifies the node: its name (NOEUD column) when the table has it,
+    otherwise its rounded coordinates.  Keys are how values are matched to the
+    coupling vertices, independently of code_aster's internal node numbering.
+    """
     n = len(tab_dict[value_cols[0]])
     have_node = "NOEUD" in tab_dict and tab_dict["NOEUD"] and tab_dict["NOEUD"][0] is not None
     coords = np.array([[float(tab_dict[c][i]) if c in tab_dict and tab_dict[c][i] is not None else 0.0
@@ -128,6 +142,7 @@ def _rows(tab_dict, value_cols):
 def node_coordinates(mesh, node_group):
     """(keys, coords (n,3)) of the nodes of ``node_group``, in table order."""
     CREA_CHAMP, POST_RELEVE_T = cmd("CREA_CHAMP"), cmd("POST_RELEVE_T")
+    # geometry as a nodal field, then extracted on the group like any result field
     geom = CREA_CHAMP(TYPE_CHAM="NOEU_GEOM_R", OPERATION="EXTR",
                       MAILLAGE=mesh, NOM_CHAM="GEOMETRIE")
     tab = POST_RELEVE_T(ACTION=dict(OPERATION="EXTRACTION", INTITULE="PRECICE_GEOM",
@@ -139,7 +154,7 @@ def node_coordinates(mesh, node_group):
         coords = np.array([[float(d.get(c, [0.0] * len(keys))[i]) for c in ("X", "Y", "Z")]
                            for i in range(len(keys))])
         keys = [tuple(np.round(coords[i], 9)) for i in range(len(keys))] if "NOEUD" not in d else keys
-    # one row per node
+    # one row per node (a table can list a node more than once)
     seen, ukeys, ucoords = set(), [], []
     for k, c in zip(keys, coords):
         if k not in seen:
@@ -159,12 +174,14 @@ def nodal_result_values(result, field, components, node_group, keys, inst=None, 
         action.update(INST=inst, CRITERE="ABSOLU", PRECISION=precision)
     d = table_to_dict(POST_RELEVE_T(ACTION=action))
     rkeys, rcoords, vals = _rows(d, list(components))
+    # inst=None: steady thermal results, where only the last computed instant matters
     if inst is None and "INST" in d:  # keep the last instant per node
         insts = np.array([float(x) for x in d["INST"]])
         last = insts.max()
         sel = np.isclose(insts, last, rtol=0, atol=max(abs(last), 1.0) * 1e-12)
         rkeys = [k for k, s in zip(rkeys, sel) if s]
         vals = vals[sel]
+    # reorder the table rows to the order of the preCICE vertices
     lookup = {k: v for k, v in zip(rkeys, vals)}
     missing = [k for k in keys if k not in lookup]
     if missing:
@@ -174,6 +191,7 @@ def nodal_result_values(result, field, components, node_group, keys, inst=None, 
 
 
 def time_list(t0, t1, nsteps=1):
+    """DEFI_LIST_REEL from t0 to t1 in ``nsteps`` equal steps."""
     DEFI_LIST_REEL = cmd("DEFI_LIST_REEL")
     return DEFI_LIST_REEL(DEBUT=t0, INTERVALLE=dict(JUSQU_A=t1, NOMBRE=int(nsteps)))
 
@@ -181,6 +199,8 @@ def time_list(t0, t1, nsteps=1):
 def coordinate_formula(interpolant, dim):
     """FORMULE f(X, Y[, Z]) that evaluates ``interpolant`` at the point."""
     FORMULE = cmd("FORMULE")
+    # the interpolant is passed in the FORMULE context under the name used in VALE;
+    # code_aster calls it with the coordinates of each point where the load is needed
     params = ("X", "Y", "Z")[:dim]
     expr = "precice_interp(" + ", ".join(params) + ")"
     return FORMULE(VALE=expr, NOM_PARA=params, precice_interp=interpolant)

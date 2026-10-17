@@ -12,6 +12,15 @@ Per time window:
 Implicit coupling: every solve starts from an immutable state (result concept +
 time); the core loop keeps or discards the new state, so a preCICE checkpoint is
 just a reference to the state at the start of the window.
+
+Why FORMULE loads: preCICE gives one force vector per coupling node and per
+coupling step.  Instead of rebuilding a code_aster load at every step, a single
+AFFE_CHAR_MECA_F(FORCE_NODALE) is created whose FX/FY/FZ are FORMULE objects of
+the node coordinates.  Each FORMULE calls a Python NodalInterpolant; updating the
+interpolant's arrays changes the load seen by the next DYNA_NON_LINE call.
+
+Units: the forces are nodal forces as delivered by preCICE with a conservative
+mapping (N, or N/m of depth for a 2D plane-strain model).
 """
 
 import os
@@ -60,6 +69,8 @@ class AsterFSISolid(SolverInterface):
                  initial_acceleration="zero", zero_load_tol=1e-8, log=print):
         self.mesh, self.model, self.material = mesh, model, material
         self.group = interface_group
+        # node group created from the cell group: code_aster group names are limited
+        # to 24 characters
         self.node_group = (interface_group + "_PRCN")[:24]
         self.loads = list(loads)
         self.mesh_name = mesh_name
@@ -82,6 +93,7 @@ class AsterFSISolid(SolverInterface):
 
     # -- set-up -------------------------------------------------------------------------
     def vertices(self, dimensions):
+        """Coupling vertices = nodes of the interface group; also builds the coupling load."""
         mdim = at.mesh_dimension(self.mesh)
         if mdim != dimensions:
             raise ValueError(f"preCICE mesh {self.mesh_name} is {dimensions}D but the code_aster "
@@ -91,9 +103,13 @@ class AsterFSISolid(SolverInterface):
         self.mesh = at.ensure_node_group(self.mesh, self.group, self.node_group)
         self.keys, coords = at.node_coordinates(self.mesh, self.node_group)
         coords = coords[:, :dimensions]
-        # one interpolant per force component, exact at the coupling nodes
+        # one interpolant per force component, exact at the coupling nodes.  The
+        # strict tolerance (1/4 of the smallest node spacing) turns any evaluation
+        # away from a coupling node into a detected "miss" (see solve) instead of a
+        # silently wrong force.
         hmin = _min_spacing(coords)
         self.force_interp = [NodalInterpolant(coords, tol=0.25 * hmin) for _ in range(dimensions)]
+        # built once: FX, FY (FZ) = FORMULE(X, Y[, Z]) -> interpolant value at the node
         cmd_ = at.cmd("AFFE_CHAR_MECA_F")
         comp_kw = ("FX", "FY", "FZ")[:dimensions]
         self._formulas = [at.coordinate_formula(f, dimensions) for f in self.force_interp]
@@ -107,17 +123,22 @@ class AsterFSISolid(SolverInterface):
         return coords
 
     def initial_state(self):
+        # no result yet: the first solve starts from rest (see initial_acceleration)
         return SolidState(None, 0.0)
 
     def initial_write_values(self, state):
+        # undeformed structure
         return {self.disp_name: np.zeros((len(self.keys), self.dim))}
 
     # -- one coupling step ----------------------------------------------------------------
     def solve(self, state, t, dt, read_values):
+        """One DYNA_NON_LINE run from ``state`` (time t) to t + dt with the given forces."""
+        # 1) new forces into the interpolants read by the FORMULE components
         forces = np.asarray(read_values[self.force_name], dtype=float).reshape(-1, self.dim)
         for c in range(self.dim):
             self.force_interp[c].update(forces[:, c])
 
+        # 2) DYNA_NON_LINE from t to t1 = t + dt (``substeps`` code_aster steps)
         t1 = t + dt
         kw = dict(
             MODELE=self.model, CHAM_MATER=self.material,
@@ -127,6 +148,13 @@ class AsterFSISolid(SolverInterface):
             SCHEMA_TEMPS=dict(SCHEMA="NEWMARK", FORMULATION="DEPLACEMENT",
                               BETA=self.beta, GAMMA=self.gamma),
         )
+        # initial state of this run:
+        #  - normal case: restart from the stored result of the state we were given.
+        #    This is how implicit coupling works without any code_aster save/restore:
+        #    a repeated window simply restarts again from the same (older) result.
+        #  - first step: explicit zero fields, otherwise code_aster computes the initial
+        #    acceleration from the load, i.e. from the force at the END of the first
+        #    window (a sudden step load that doubles the first response)
         if state.result is not None:
             kw["ETAT_INIT"] = dict(EVOL_NOLI=state.result, INST=state.t,
                                    CRITERE="ABSOLU", PRECISION=_eps(dt))
@@ -139,7 +167,10 @@ class AsterFSISolid(SolverInterface):
         if not np.any(forces) and "CONVERGENCE" not in self.dyna_options:
             # relative residual is 0/0 without external load: use the absolute one
             kw["CONVERGENCE"] = dict(RESI_GLOB_MAXI=self.zero_load_tol)
-        kw.update(self.dyna_options)
+        kw.update(self.dyna_options)  # user options (SOLVEUR, NEWTON, ...) win
+        # count interpolant misses around the solve: a miss means code_aster evaluated
+        # FX/FY/FZ somewhere else than at a coupling node (wrong group, deformed
+        # coordinates, ...) and that part of the force would have been lost
         misses = sum(fi.misses for fi in self.force_interp)
         result = at.cmd("DYNA_NON_LINE")(**kw)
         if sum(fi.misses for fi in self.force_interp) > misses:
@@ -148,12 +179,14 @@ class AsterFSISolid(SolverInterface):
                 "(FORMULE called at points farther than 1/4 of the node spacing): the "
                 "force would be lost. Check that the interface group is the loaded group.")
 
+        # 3) total displacement at t1 on the coupling nodes, in vertex order
         disp = at.nodal_result_values(result, "DEPL", self.comps, self.node_group, self.keys,
                                       inst=t1, precision=_eps(dt))
         return SolidState(result, t1), {self.disp_name: disp}
 
     # -- monitoring -----------------------------------------------------------------------
     def on_time_window_complete(self, state, t, window):
+        """Accepted window: log the total coupling force, write MED snapshots."""
         f = self.force_interp
         ftot = [float(np.sum(fi.values)) for fi in f]
         if window == 1 or window % 10 == 0:
@@ -165,6 +198,7 @@ class AsterFSISolid(SolverInterface):
 
 
 def _min_spacing(coords):
+    """Smallest distance between two coupling nodes (sampled for large interfaces)."""
     n = len(coords)
     if n < 2:
         return 1.0
@@ -179,6 +213,7 @@ def _min_spacing(coords):
 
 
 def _eps(dt):
+    """Tolerance used to find an instant in a result (relative to the time step)."""
     return max(abs(dt) * 1e-6, 1e-12)
 
 
@@ -195,6 +230,8 @@ def run_fsi(mesh, model, material, interface_group, loads=(), participant=None,
     if not config_file:
         raise ValueError("give config_file= or set PRECICE_CONFIG_FILE (absolute path)")
     solver = AsterFSISolid(mesh, model, material, interface_group, loads, **options)
+    # copy watch points / iteration logs out of code_aster's temporary folder even
+    # if the run fails
     try:
         return CouplingLoop(solver, participant, config_file).run()
     finally:
