@@ -82,6 +82,13 @@ rewrite it on each run.
 | `examples/selftest` | code_aster only, **no preCICE** | beam theory |
 | `examples/perpendicular-flap` | OpenFOAM `pimpleFoam` ↔ code_aster FSI (2D `D_PLAN`) | CalculiX / solids4foam tutorial runs |
 | `examples/heated-plate` | OpenFOAM `buoyantSimpleFoam` ↔ code_aster CHT (2D `PLAN`) | `chtMultiRegionSimpleFoam` OpenFOAM-only case |
+| `examples/elastic-tube-3d` | OpenFOAM `pimpleFoam` ↔ code_aster FSI (3D, TETRA10 from the CalculiX tutorial mesh) | preCICE tutorial with CalculiX |
+
+**Elastic tube 3D: fluid tolerances matter.** With the tutorial's `pFinal` settings (`relTol 0.1`,
+`maxIter 5`) the fluid forces carry ~1e-2 relative noise and the coupling never reaches the 1e-3
+criterion (30/30 iterations per window, with CalculiX too). The example uses `relTol 0`,
+`tolerance 1e-8`, `maxIter 100` for `pFinal` and absolute-or-relative convergence measures:
+4–8 coupling iterations per window with code_aster.
 
 Run a coupled case by starting both participants, in any order:
 

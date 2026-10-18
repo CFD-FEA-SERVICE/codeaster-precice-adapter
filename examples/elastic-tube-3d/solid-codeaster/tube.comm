@@ -1,0 +1,40 @@
+# elastic-tube-3d (preCICE tutorial), solid participant: code_aster + precice_aster (FSI, 3D)
+# Copyright (C) 2026 CFD FEA SERVICE S.R.L.
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+# Tube r = 5..6 mm, length 50 mm, quadratic tetrahedra converted from the CalculiX case
+# (tools/inp_to_mail.py). Same data as solid-calculix/tube.inp:
+# E = 300 kPa, nu = 0.3, rho = 1200 kg/m3, inlet and outlet rings clamped.
+# The CalculiX case uses NLGEOM; here deformation="PETIT" for the first test
+# (set DEFORMATION to "GROT_GDEP" below to try large rotations).
+import os
+import sys
+
+sys.path.insert(0, os.environ.get("PRECICE_ASTER_ROOT", "/opt/codeaster-precice-adapter"))
+
+from code_aster.Commands import *  # noqa: F401,F403
+
+DEFORMATION = "PETIT"
+
+DEBUT()
+
+mesh = LIRE_MAILLAGE(UNITE=20, FORMAT="ASTER")
+model = AFFE_MODELE(MAILLAGE=mesh, AFFE=_F(TOUT="OUI", PHENOMENE="MECANIQUE", MODELISATION="3D"))
+
+tube = DEFI_MATERIAU(ELAS=_F(E=3.0e5, NU=0.3, RHO=1200.0))
+mater = AFFE_MATERIAU(MAILLAGE=mesh, AFFE=_F(TOUT="OUI", MATER=tube))
+
+ends = AFFE_CHAR_MECA(MODELE=model, DDL_IMPO=_F(GROUP_NO=("inlet", "outlet"), DX=0.0, DY=0.0, DZ=0.0))
+
+from precice_aster.fsi import run_fsi  # noqa: E402
+
+run_fsi(mesh, model, mater,
+        interface_group="interface",     # TRIA6 faces of the inner (wetted) surface
+        loads=[ends],
+        mesh_name="Solid-Mesh", force_name="Force", displacement_name="Displacement",
+        deformation=DEFORMATION,
+        newmark=(0.25, 0.5),
+        output_dir=os.path.join(os.environ.get("PRECICE_CASE_DIR", "."), "results"),
+        output_every=10)
+
+FIN()
