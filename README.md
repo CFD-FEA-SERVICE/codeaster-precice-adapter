@@ -5,7 +5,7 @@ Couple **code_aster** (17.x) with OpenFOAM, CalculiX, SU2, FEniCS, … through *
 | Module | code_aster side | Reads | Writes |
 |---|---|---|---|
 | `precice_aster.fsi` | `DYNA_NON_LINE` (Newmark), one call per coupling step | `Force` (nodal) | `Displacement` |
-| `precice_aster.cht` | `THER_LINEAIRE` / `THER_NON_LINE`, steady or transient | `Sink-Temperature-*`, `Heat-Transfer-Coefficient-*` (Robin) | wall `T`, `k/δ` |
+| `precice_aster.cht` | `THER_LINEAIRE` / `THER_NON_LINE`, steady or transient | `Sink-Temperature-*`, `Heat-Transfer-Coefficient-*` (Robin) | energy-consistent sink `T`, `k/δ` |
 
 This is a clean rewrite. It shares no code with the original `precice/code_aster-adapter`, which covers CHT only, targets code_aster 14 and is licensed GPL-2.0.
 
@@ -70,10 +70,12 @@ Environment variables:
 |---|---|
 | `PRECICE_CONFIG_FILE` | absolute path of `precice-config.xml` (code_aster runs in a temp dir) |
 | `PRECICE_PARTICIPANT` | participant name, default `Solid` |
-| `PRECICE_CASE_DIR` | case folder (used by the examples for `results/`) |
+| `PRECICE_CASE_DIR` | participant case folder: preCICE writes its logs, watch points and profiling there (live), and the examples their `results/` |
 
-**The `exchange-directory` of `<m2n:sockets>` must be absolute.** The example `run.sh` scripts
-rewrite it on each run.
+**`exchange-directory` of `<m2n:sockets>`:** since 0.1.4 the preCICE participant is created in
+`PRECICE_CASE_DIR`, so a relative path (e.g. `".."`, as in the preCICE tutorials) works when that
+variable is set. Without it, code_aster runs in a temporary folder and the path must be absolute;
+the example `run.sh` scripts rewrite it on each run.
 
 ## Examples
 
@@ -89,6 +91,10 @@ rewrite it on each run.
 criterion (30/30 iterations per window, with CalculiX too). The example uses `relTol 0`,
 `tolerance 1e-8`, `maxIter 100` for `pFinal` and absolute-or-relative convergence measures:
 4–8 coupling iterations per window with code_aster.
+
+**Heated plate: no `residualControl`.** A steady OpenFOAM solver with `residualControl` stops as soon
+as it converges, before the coupling end time, and code_aster then waits forever for the next data.
+The example removes it so that the fluid runs to `max-time`, like the solid.
 
 Run a coupled case by starting both participants, in any order:
 
@@ -122,6 +128,8 @@ cd examples/perpendicular-flap
 * CHT: the wall temperature matches the analytic value exactly.
 
 These tests validate the preCICE side and the command keywords used; the self-test validates code_aster.
+
+See `CHANGELOG.md` for the changes between versions.
 
 ## Limitations (v0.1)
 

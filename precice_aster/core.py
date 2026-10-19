@@ -27,11 +27,35 @@ Sequence of one coupled run (preCICE v3 API)::
     finalize()
 """
 
+import contextlib
 import glob
 import math
 import os
 import shutil
 import time as _time
+
+
+@contextlib.contextmanager
+def _in_directory(path):
+    """Run the block with ``path`` as working directory (no-op when ``path`` is None).
+
+    preCICE opens its iteration/convergence logs and watch-point files, and writes its
+    profiling, relative to the working directory.  code_aster runs in a temporary
+    directory, so without this the files would only appear at the end of the run (copied
+    by :func:`collect_precice_outputs`) and would be lost if the job were killed.  Only
+    the preCICE calls that open or write these files run here: code_aster itself keeps
+    its own working directory, where its fort.* and database files live.
+    """
+    if not path:
+        yield
+        return
+    previous = os.getcwd()
+    os.makedirs(path, exist_ok=True)
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
 
 
 class SolverInterface:
@@ -80,7 +104,7 @@ class CouplingLoop:
     """Drive a :class:`SolverInterface` with a preCICE participant."""
 
     def __init__(self, solver, participant_name, config_file, rank=0, size=1,
-                 precice_module=None, log=print):
+                 precice_module=None, log=print, output_dir=None):
         if precice_module is None:
             import precice as precice_module  # pyprecice
         self.precice = precice_module
@@ -89,13 +113,20 @@ class CouplingLoop:
         self.config_file = config_file
         self.rank, self.size = rank, size
         self.log = log
+        # where preCICE writes its log files: the participant's case folder when known
+        # ($PRECICE_CASE_DIR, set by the launcher), otherwise the working directory
+        self.output_dir = output_dir or os.environ.get("PRECICE_CASE_DIR") or None
         self.stats = {"windows": 0, "solves": 0, "restores": 0, "wall": 0.0}
 
     def run(self):
         """Run the coupled simulation to the end; return ``(final_state, final_time)``."""
         s = self.solver
-        p = self.precice.Participant(self.participant_name, self.config_file,
-                                     self.rank, self.size)
+        # the config is read and the log/watch-point files are opened here: do it in the
+        # case folder, so that they are written there live (relative exchange-directory
+        # entries are then also resolved from the case folder, as in the tutorials)
+        with _in_directory(self.output_dir):
+            p = self.precice.Participant(self.participant_name, self.config_file,
+                                         self.rank, self.size)
         # the solver builds its coupling vertices only now, because the mesh dimension
         # (2D/3D) is defined in precice-config.xml, not in the solver input
         dims = p.get_mesh_dimensions(s.mesh_name)
@@ -111,7 +142,8 @@ class CouplingLoop:
         if p.requires_initial_data():
             for name, values in s.initial_write_values(state).items():
                 p.write_data(s.mesh_name, name, ids, values)
-        p.initialize()
+        with _in_directory(self.output_dir):
+            p.initialize()          # opens precice-<participant>-iterations/convergence.log
 
         t, window, checkpoint = 0.0, 0, None
         t0_wall = _time.time()
@@ -155,7 +187,8 @@ class CouplingLoop:
 
         self.stats["wall"] = _time.time() - t0_wall
         s.finalize(state, t)
-        p.finalize()
+        with _in_directory(self.output_dir):
+            p.finalize()            # writes precice-profiling/
         st = self.stats
         avg = st["solves"] / max(st["windows"], 1)
         self.log(f"[precice-aster] done: t = {t:g}, {st['windows']} windows, "

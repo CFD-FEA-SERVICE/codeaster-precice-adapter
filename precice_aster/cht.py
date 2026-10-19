@@ -5,8 +5,15 @@
 
 Robin-Robin coupling, as in the preCICE OpenFOAM CHT module:
   read  : Sink-Temperature-Fluid, Heat-Transfer-Coefficient-Fluid  -> ECHANGE load
-  write : Sink-Temperature-Solid  = wall temperature
-          Heat-Transfer-Coefficient-Solid = lambda / delta
+  write : Sink-Temperature-Solid  = T_wall + (h_f / h_s) (T_wall - T_sink_fluid)
+          Heat-Transfer-Coefficient-Solid = h_s = lambda / delta
+The partner treats the solid "sink temperature" as the temperature at a distance
+delta inside the solid (the OpenFOAM adapter uses the first cell centre). Sending
+the wall temperature itself would add a spurious resistance delta/lambda on the
+fluid side only, so the fluid would receive less heat than the solid gives
+(energy not conserved at the interface). The corrected sink temperature makes the
+heat flux seen by the fluid equal to the solid's, h_f (T_wall - T_sink_fluid), for
+any delta, and puts the fluid face at T_wall.
 All data live on the coupling nodes; the ECHANGE coefficients are FORMULE
 objects reading nodal interpolants, so the load is built once.
 """
@@ -56,6 +63,8 @@ class AsterCHTSolid(SolverInterface):
         self.output_dir, self.output_every = output_dir, int(output_every)
         self.ther_options = dict(ther_options or {})
         self.log = log
+        self._tf = None   # last fluid sink temperature at the coupling nodes
+        self._hf = None   # last fluid HTC at the coupling nodes
 
     def vertices(self, dimensions):
         """Coupling vertices = interface nodes; also builds the Robin (ECHANGE) load."""
@@ -86,8 +95,13 @@ class AsterCHTSolid(SolverInterface):
     def _write(self, temps):
         """Data sent to the fluid: wall temperature and the solid-side HTC k/delta."""
         n = len(self.keys)
-        return {self.write_data[0]: np.asarray(temps, float).reshape(n),
-                self.write_data[1]: np.full(n, self.k / self.delta)}
+        tw = np.asarray(temps, float).reshape(n)
+        hs = self.k / self.delta
+        if self._tf is not None:
+            # energy-consistent sink temperature (see the module docstring)
+            tw = tw + (self._hf / hs) * (tw - self._tf)
+        return {self.write_data[0]: tw,
+                self.write_data[1]: np.full(n, hs)}
 
     def initial_write_values(self, state):
         return self._write(np.full(len(self.keys), self.T0))
@@ -95,8 +109,10 @@ class AsterCHTSolid(SolverInterface):
     def solve(self, state, t, dt, read_values):
         """One thermal solve with the fluid's sink temperature and HTC."""
         # 1) fluid data into the interpolants read by the ECHANGE load
-        self.t_sink.update(np.asarray(read_values[self.read_data[0]], float).reshape(-1))
-        self.h_conv.update(np.asarray(read_values[self.read_data[1]], float).reshape(-1))
+        self._tf = np.asarray(read_values[self.read_data[0]], float).reshape(-1)
+        self._hf = np.asarray(read_values[self.read_data[1]], float).reshape(-1)
+        self.t_sink.update(self._tf)
+        self.h_conv.update(self._hf)
         # 2) THER_LINEAIRE (or THER_NON_LINE), steady or transient
         t1 = t + dt
         excit = [dict(CHARGE=l) for l in self.loads] + [dict(CHARGE=self.robin)]
