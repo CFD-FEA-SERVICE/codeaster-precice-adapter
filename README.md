@@ -5,7 +5,7 @@ Couple **code_aster** (17.x) with OpenFOAM, CalculiX, SU2, FEniCS, … through *
 | Module | code_aster side | Reads | Writes |
 |---|---|---|---|
 | `precice_aster.fsi` | `DYNA_NON_LINE` (Newmark), one call per coupling step | `Force` (nodal) | `Displacement` |
-| `precice_aster.cht` | `THER_LINEAIRE` / `THER_NON_LINE`, steady or transient | `Sink-Temperature-*`, `Heat-Transfer-Coefficient-*` (Robin) | wall `T`, `k/δ` |
+| `precice_aster.cht` | `THER_LINEAIRE` / `THER_NON_LINE`, steady or transient | `Sink-Temperature-*`, `Heat-Transfer-Coefficient-*` (Robin) | energy-consistent sink `T`, `k/δ` |
 
 This is a clean rewrite. It shares no code with the original `precice/code_aster-adapter`, which covers CHT only, targets code_aster 14 and is licensed GPL-2.0.
 
@@ -122,6 +122,8 @@ cd examples/perpendicular-flap
 * CHT: the wall temperature matches the analytic value exactly.
 
 These tests validate the preCICE side and the command keywords used; the self-test validates code_aster.
+
+See `CHANGELOG.md` for the changes between versions.
 
 ## Limitations (v0.1)
 
